@@ -15,6 +15,9 @@ export const STORAGE_KEYS = {
   claudeOverlayCollapsed: 'claude_overlay_collapsed',
   codexOverlayEnabled: 'codex_overlay_enabled',
   codexOverlayCollapsed: 'codex_overlay_collapsed',
+  /** User-dragged overlay position (`{ top, right }` in px from the viewport edges). */
+  claudeOverlayPosition: 'claude_overlay_position',
+  codexOverlayPosition: 'codex_overlay_position',
   glmApiKey: 'glm_api_key',
   opencodeApiKey: 'opencode_api_key',
   /** User-configurable display, badge, and overlay preferences. */

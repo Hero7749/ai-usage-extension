@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import claudeBrandAsset from '../assets/brands/claude-anthropic.jpg?inline';
 import codexBrandAsset from '../assets/brands/codex-openai.jpg?inline';
@@ -11,6 +11,13 @@ import {
   readExtensionSettings,
 } from '../shared/settings';
 import { useNow } from '../shared/hooks/useNow';
+import {
+  DEFAULT_OVERLAY_POSITION,
+  DRAG_THRESHOLD,
+  clampOverlayPosition,
+  normalizeOverlayPosition,
+  type OverlayPosition,
+} from './position';
 import { msg, setLocaleMessages } from '../shared/i18n';
 import { watchLanguage } from '../shared/language';
 import { requestLocaleMessages, requestUsageRefresh } from '../shared/messaging';
@@ -35,6 +42,21 @@ import {
 const HOST_ID = 'ai-usage-claude-overlay-host';
 
 const TAB_LABEL = 'LIMITS';
+
+/** Must match `.aiu-tab` in overlay.css. */
+const TAB_WIDTH = 22;
+const TAB_BOTTOM = 14 + 96;
+const CARD_WIDTH = 296;
+const KEYBOARD_STEP = 16;
+
+interface DragState {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  origin: OverlayPosition;
+  verticalOnly: boolean;
+  moved: boolean;
+}
 
 type AnyUsage = {
   session: UsageLimit;
@@ -122,6 +144,7 @@ const hostname = window.location.hostname;
 const usageField: OverlayProviderId = hostname.includes('claude.ai') ? 'claude' : 'codex';
 const enabledKey = OVERLAY_STORAGE_KEYS[usageField].enabled;
 const collapsedKey = OVERLAY_STORAGE_KEYS[usageField].collapsed;
+const positionKey = OVERLAY_STORAGE_KEYS[usageField].position;
 const { brandAsset, title, inputSelector } = OVERLAY_HOSTS[usageField];
 const enabledByDefault = OVERLAY_DEFAULTS[usageField];
 
@@ -134,6 +157,11 @@ const UsageOverlay: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hasInput, setHasInput] = useState(false);
+  const [position, setPosition] = useState<OverlayPosition>(DEFAULT_OVERLAY_POSITION);
+  const [isDragging, setIsDragging] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const suppressClickRef = useRef(false);
   const now = useNow(60_000);
 
   useEffect(
@@ -173,6 +201,7 @@ const UsageOverlay: React.FC = () => {
         STORAGE_KEYS.usageState,
         enabledKey,
         collapsedKey,
+        positionKey,
         STORAGE_KEYS.extensionSettings,
       ]);
 
@@ -184,6 +213,7 @@ const UsageOverlay: React.FC = () => {
       setUsage(usageState[usageField] ?? null);
       setEnabled(snapshot[enabledKey] ?? enabledByDefault);
       setCollapsed(snapshot[collapsedKey] !== false);
+      setPosition(normalizeOverlayPosition(snapshot[positionKey]) ?? DEFAULT_OVERLAY_POSITION);
       setPercentageDisplay(
         normalizeSettings(snapshot[STORAGE_KEYS.extensionSettings]).percentageDisplay,
       );
@@ -211,6 +241,12 @@ const UsageOverlay: React.FC = () => {
 
       if (changes[collapsedKey]) {
         setCollapsed(changes[collapsedKey].newValue !== false);
+      }
+
+      if (changes[positionKey] && !dragRef.current) {
+        setPosition(
+          normalizeOverlayPosition(changes[positionKey].newValue) ?? DEFAULT_OVERLAY_POSITION,
+        );
       }
       if (changes[STORAGE_KEYS.extensionSettings]) {
         setPercentageDisplay(
@@ -251,7 +287,137 @@ const UsageOverlay: React.FC = () => {
     };
   }, []);
 
+  const clampToViewport = useCallback(
+    (next: OverlayPosition, isCollapsed: boolean): OverlayPosition =>
+      clampOverlayPosition(next, {
+        viewportWidth: document.documentElement.clientWidth || window.innerWidth,
+        viewportHeight: document.documentElement.clientHeight || window.innerHeight,
+        width: wrapRef.current?.offsetWidth || CARD_WIDTH,
+        height: isCollapsed ? TAB_BOTTOM : wrapRef.current?.offsetHeight || TAB_BOTTOM,
+        tabWidth: TAB_WIDTH,
+      }),
+    [],
+  );
+
+  const savePosition = useCallback((next: OverlayPosition): void => {
+    void chrome.storage.local.set({ [positionKey]: next });
+  }, []);
+
+  // Keep the overlay on screen when the window shrinks or the card grows.
+  useEffect(() => {
+    const reclamp = (): void => {
+      if (dragRef.current) return;
+      setPosition((prev) => {
+        const next = clampToViewport(prev, collapsed);
+        return next.top === prev.top && next.right === prev.right ? prev : next;
+      });
+    };
+    reclamp();
+    window.addEventListener('resize', reclamp);
+    return () => window.removeEventListener('resize', reclamp);
+  }, [clampToViewport, collapsed, usage, hasInput, enabled]);
+
+  const handlePointerDown = useCallback(
+    (event: React.PointerEvent<HTMLElement>, source: 'tab' | 'header'): void => {
+      // A drag released outside the window never fires its click, so always
+      // start a fresh press without a pending click suppression.
+      suppressClickRef.current = false;
+      if (event.button !== 0) return;
+      if (source === 'header' && (event.target as HTMLElement).closest('button')) return;
+      // The collapsed tab is pinned to the right edge, so it only moves vertically.
+      const verticalOnly = source === 'tab' && collapsed;
+      dragRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        origin: position,
+        verticalOnly,
+        moved: false,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [collapsed, position],
+  );
+
+  const handlePointerMove = useCallback(
+    (event: React.PointerEvent<HTMLElement>): void => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (!drag.moved) {
+        if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        drag.moved = true;
+        setIsDragging(true);
+      }
+      event.preventDefault();
+      setPosition(
+        clampToViewport(
+          {
+            top: drag.origin.top + dy,
+            right: drag.verticalOnly ? drag.origin.right : drag.origin.right - dx,
+          },
+          collapsed,
+        ),
+      );
+    },
+    [clampToViewport, collapsed],
+  );
+
+  const handlePointerEnd = useCallback(
+    (event: React.PointerEvent<HTMLElement>): void => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      dragRef.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      if (!drag.moved) return;
+      suppressClickRef.current = true;
+      setIsDragging(false);
+      setPosition((current) => {
+        savePosition(current);
+        return current;
+      });
+    },
+    [savePosition],
+  );
+
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>): void => {
+      const delta: Record<string, [number, number]> = {
+        ArrowUp: [-KEYBOARD_STEP, 0],
+        ArrowDown: [KEYBOARD_STEP, 0],
+        ArrowLeft: [0, KEYBOARD_STEP],
+        ArrowRight: [0, -KEYBOARD_STEP],
+      };
+      const step = delta[event.key];
+      if (!step || (collapsed && step[1] !== 0)) return;
+      event.preventDefault();
+      const next = clampToViewport(
+        { top: position.top + step[0], right: position.right + step[1] },
+        collapsed,
+      );
+      setPosition(next);
+      savePosition(next);
+    },
+    [clampToViewport, collapsed, position, savePosition],
+  );
+
+  const resetPosition = useCallback(
+    (event: React.MouseEvent<HTMLElement>): void => {
+      if ((event.target as HTMLElement).closest('button')) return;
+      setPosition(clampToViewport(DEFAULT_OVERLAY_POSITION, collapsed));
+      void chrome.storage.local.remove(positionKey);
+    },
+    [clampToViewport, collapsed],
+  );
+
   const toggleCollapsed = useCallback((): void => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
     setCollapsed((prev) => {
       const next = !prev;
       void chrome.storage.local.set({ [collapsedKey]: next });
@@ -265,11 +431,24 @@ const UsageOverlay: React.FC = () => {
 
   return (
     <div className="aiu-root" key={localeVersion}>
-      <div className={`aiu-wrap ${collapsed ? 'aiu-wrap--collapsed' : ''}`}>
+      <div
+        ref={wrapRef}
+        className={`aiu-wrap ${collapsed ? 'aiu-wrap--collapsed' : ''} ${isDragging ? 'aiu-wrap--dragging' : ''}`}
+        style={{
+          top: `${position.top}px`,
+          right: `${position.right}px`,
+          transform: collapsed ? `translateX(${position.right + CARD_WIDTH}px)` : undefined,
+        }}
+      >
         <button
           type="button"
           className="aiu-tab"
           onClick={toggleCollapsed}
+          onKeyDown={handleTabKeyDown}
+          onPointerDown={(event) => handlePointerDown(event, 'tab')}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
           title={collapsed ? msg('showLimits') : msg('hideLimits')}
           aria-label={collapsed ? msg('showLimits') : msg('hideLimits')}
           aria-expanded={!collapsed}
@@ -279,7 +458,14 @@ const UsageOverlay: React.FC = () => {
         </button>
 
         <div className="aiu-card">
-          <div className="aiu-header">
+          <div
+            className="aiu-header"
+            onPointerDown={(event) => handlePointerDown(event, 'header')}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerEnd}
+            onPointerCancel={handlePointerEnd}
+            onDoubleClick={resetPosition}
+          >
             <img className="aiu-brand" src={brandAsset} alt="" />
             <div className="aiu-heading">
               <p className="aiu-title">{title}</p>
