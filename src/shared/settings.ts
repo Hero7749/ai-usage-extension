@@ -17,15 +17,17 @@ export const OVERLAY_DEFAULTS: Record<OverlayProviderId, boolean> = {
 
 export const OVERLAY_STORAGE_KEYS: Record<
   OverlayProviderId,
-  { enabled: string; collapsed: string }
+  { enabled: string; collapsed: string; position: string }
 > = {
   claude: {
     enabled: STORAGE_KEYS.claudeOverlayEnabled,
     collapsed: STORAGE_KEYS.claudeOverlayCollapsed,
+    position: STORAGE_KEYS.claudeOverlayPosition,
   },
   codex: {
     enabled: STORAGE_KEYS.codexOverlayEnabled,
     collapsed: STORAGE_KEYS.codexOverlayCollapsed,
+    position: STORAGE_KEYS.codexOverlayPosition,
   },
 };
 

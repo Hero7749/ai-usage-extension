@@ -24,9 +24,17 @@
   transform: translateX(0);
 }
 
-/* Slide the card fully off-screen — only the 22px tab stays visible. */
-.aiu-wrap--collapsed {
-  transform: translateX(314px);
+/* Collapsed: the inline transform slides the card fully off the right edge so
+   only the 22px tab stays visible, at whatever height the user dragged it to. */
+
+.aiu-wrap--dragging {
+  transition: none;
+  user-select: none;
+}
+
+.aiu-wrap--dragging .aiu-header,
+.aiu-wrap--dragging .aiu-tab {
+  cursor: grabbing;
 }
 
 /* ---- Side tab ------------------------------------------------------- */
@@ -49,6 +57,7 @@
   flex-direction: column;
   gap: 6px;
   padding: 0;
+  touch-action: none;
 }
 
 .aiu-tab:hover {
@@ -86,6 +95,8 @@
   align-items: center;
   gap: 10px;
   margin-bottom: 14px;
+  cursor: grab;
+  touch-action: none;
 }
 
 .aiu-brand {
@@ -221,14 +232,6 @@
   }
   50% {
     opacity: 0.9;
-  }
-}
-
-@media (max-width: 768px) {
-  .aiu-wrap {
-    top: auto;
-    right: 12px;
-    bottom: 12px;
   }
 }
 
